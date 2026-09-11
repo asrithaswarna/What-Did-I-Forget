@@ -1,9 +1,10 @@
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import joblib
-import os
 
 
 # =========================================================
@@ -15,44 +16,83 @@ app = FastAPI(
     description="ML-powered forgetfulness prediction API",
     version="1.0"
 )
+
+
+# =========================================================
+# CORS
+# =========================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+
+        # Add your Vercel URL here after frontend deployment.
+        # Example:
+        # "https://your-project.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Load trained model
-model = joblib.load("random_forest_model.pkl")
 
-# Load preprocessing pipeline
-preprocessor = joblib.load("preprocessor.pkl")
+
 # =========================================================
 # LOAD MODEL
 # =========================================================
+#
+# Project structure:
+#
+# What-Did-I-Forget/
+#
+# ├── backend/
+# │   └── main.py
+# │
+# ├── model/
+# │   ├── random_forest_model.pkl
+# │   └── preprocessor.pkl
+# │
+# └── frontend/
+#
+# =========================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-MODEL_PATH = os.path.join(BASE_DIR, "random_forest_model.pkl")
-PREPROCESSOR_PATH = os.path.join(BASE_DIR, "preprocessor.pkl")
+MODEL_PATH = BASE_DIR / "model" / "random_forest_model.pkl"
+PREPROCESSOR_PATH = BASE_DIR / "model" / "preprocessor.pkl"
+
+
+model = None
+preprocessor = None
+
 
 try:
-    model = joblib.load(MODEL_PATH)
-    preprocessor = joblib.load(PREPROCESSOR_PATH)
-
     print("======================================")
+    print("LOADING MODEL...")
+    print("======================================")
+
+    print("Model path:", MODEL_PATH)
+    print("Preprocessor path:", PREPROCESSOR_PATH)
+
+    model = joblib.load(MODEL_PATH)
     print("MODEL LOADED SUCCESSFULLY")
+
+    preprocessor = joblib.load(PREPROCESSOR_PATH)
     print("PREPROCESSOR LOADED SUCCESSFULLY")
+
     print("======================================")
 
 except Exception as e:
-    print("ERROR LOADING MODEL/PREPROCESSOR:")
-    print(e)
+
+    print("======================================")
+    print("ERROR LOADING MODEL/PREPROCESSOR")
+    print("======================================")
+    print(str(e))
+    print("======================================")
+
     model = None
     preprocessor = None
 
@@ -91,6 +131,28 @@ def home():
 
 
 # =========================================================
+# HEALTH CHECK
+# =========================================================
+
+@app.get("/health")
+def health():
+
+    if model is None or preprocessor is None:
+
+        return {
+            "status": "error",
+            "model_loaded": False,
+            "preprocessor_loaded": False
+        }
+
+    return {
+        "status": "healthy",
+        "model_loaded": True,
+        "preprocessor_loaded": True
+    }
+
+
+# =========================================================
 # PREDICTION
 # =========================================================
 
@@ -99,64 +161,88 @@ def predict(data: PredictionInput):
 
     try:
 
+        # -------------------------------------------------
         # Check model
+        # -------------------------------------------------
+
         if model is None or preprocessor is None:
+
             raise HTTPException(
                 status_code=500,
                 detail="Model or preprocessor could not be loaded."
             )
 
 
+        # -------------------------------------------------
         # Convert input into DataFrame
+        # -------------------------------------------------
+
         input_data = pd.DataFrame([{
+
             "day_of_week": data.day_of_week,
+
             "destination": data.destination,
+
             "time_of_day": data.time_of_day,
+
             "weather": data.weather,
+
             "trip_duration": data.trip_duration,
+
             "item": data.item,
+
             "item_relevance": data.item_relevance,
+
             "item_importance": data.item_importance,
+
             "times_carried_before": data.times_carried_before,
+
             "previous_forget_count": data.previous_forget_count
+
         }])
 
 
         print("\n======================================")
         print("NEW PREDICTION REQUEST")
         print("======================================")
+
         print(input_data)
 
 
-        # =================================================
+        # -------------------------------------------------
         # PREPROCESS
-        # =================================================
+        # -------------------------------------------------
 
         processed_data = preprocessor.transform(input_data)
 
 
-        # =================================================
+        # -------------------------------------------------
         # PREDICT
-        # =================================================
-
-        prediction = model.predict(processed_data)[0]
+        # -------------------------------------------------
 
         probabilities = model.predict_proba(processed_data)[0]
 
 
-        # Probability of class 1
+        # -------------------------------------------------
+        # Find probability of class 1
+        # -------------------------------------------------
+
         if hasattr(model, "classes_"):
 
             classes = list(model.classes_)
 
             if 1 in classes:
+
                 forget_probability = probabilities[
                     classes.index(1)
                 ]
+
             else:
+
                 forget_probability = max(probabilities)
 
         else:
+
             forget_probability = max(probabilities)
 
 
@@ -165,62 +251,99 @@ def predict(data: PredictionInput):
         forget_percentage = forget_probability * 100
 
 
-        # =================================================
+        # -------------------------------------------------
         # THRESHOLD
-        # =================================================
+        # -------------------------------------------------
+        #
+        # Final threshold selected for this project = 0.35
+        #
+        # -------------------------------------------------
 
         threshold = 0.35
 
+
         if forget_probability >= threshold:
+
             prediction_label = "FORGOT"
+
         else:
+
             prediction_label = "NOT FORGOTTEN"
 
 
-        # =================================================
+        # -------------------------------------------------
         # RISK
-        # =================================================
+        # -------------------------------------------------
 
         if forget_probability >= 0.60:
+
             risk = "HIGH"
 
         elif forget_probability >= 0.35:
+
             risk = "MEDIUM"
 
         else:
+
             risk = "LOW"
 
 
-        # =================================================
+        # -------------------------------------------------
         # RESPONSE
-        # =================================================
+        # -------------------------------------------------
 
         result = {
+
             "item": data.item,
-            "forget_probability": round(forget_probability, 4),
-            "forget_percentage": round(forget_percentage, 2),
+
+            "forget_probability": round(
+                forget_probability,
+                4
+            ),
+
+            "forget_percentage": round(
+                forget_percentage,
+                2
+            ),
+
             "prediction": prediction_label,
+
             "risk": risk,
+
             "threshold": threshold
+
         }
 
 
         print("\nRESULT:")
         print(result)
+
         print("======================================\n")
 
 
         return result
 
 
+    except HTTPException:
+
+        raise
+
+
     except Exception as e:
 
         print("\n======================================")
         print("PREDICTION ERROR")
+        print("======================================")
+
         print(str(e))
+
         print("======================================\n")
 
+
         raise HTTPException(
+
             status_code=500,
+
             detail=str(e)
+
         )
